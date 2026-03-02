@@ -143,5 +143,6 @@ if (isMainModule) {
 
   process.on('unhandledRejection', reason => {
     console.error('[FATAL] Unhandled rejection:', reason)
+    shutdown('UNHANDLED_REJECTION')
   })
 }
