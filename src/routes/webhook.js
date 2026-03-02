@@ -1,0 +1,293 @@
+import {Router} from 'express'
+import Stripe from 'stripe'
+import {createLicense, findLicenseByPaymentId, revokeAndCarryOver, logVerification} from '../db.js'
+import {createInvoiceXpress} from '../services/invoicexpress.js'
+import {notifyNewLicensePurchased} from '../services/telegram.js'
+import {countries} from '../services/countries.js'
+/**
+ * Creates the Stripe webhook router.
+ * @param {import('better-sqlite3').Database} db
+ */
+export function createWebhookRouter(db) {
+  const router = Router()
+
+  // Stripe sends raw body, we parse it ourselves for signature verification
+  router.post('/stripe', async (req, res) => {
+    const sig = req.headers['stripe-signature']
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET
+
+    if (!webhookSecret) {
+      console.error('[webhook] STRIPE_WEBHOOK_SECRET not configured')
+      return res.status(500).json({error: 'Webhook secret not configured'})
+    }
+
+    let event
+    try {
+      const stripe = new Stripe(process.env.STRIPE_SECRET_KEY)
+      event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret)
+    } catch (err) {
+      console.error(`[webhook] Signature verification failed: ${err.message}`)
+      return res.status(400).json({error: `Webhook signature verification failed`})
+    }
+
+    // We handle two event types:
+    // 1. checkout.session.completed — instant card payments
+    // 2. payment_intent.succeeded — SEPA / delayed payments (funds confirmed)
+    const handledTypes = ['checkout.session.completed', 'payment_intent.succeeded']
+
+    if (!handledTypes.includes(event.type)) {
+      // Acknowledge but ignore other event types
+      return res.json({received: true, handled: false})
+    }
+
+    try {
+      const result = await handlePaymentEvent(db, event)
+      return res.json({received: true, handled: true, ...result})
+    } catch (err) {
+      console.error(`[webhook] Error handling ${event.type}: ${err.message}`)
+      return res.status(500).json({error: 'Internal error processing webhook'})
+    }
+  })
+
+  return router
+}
+
+/**
+ * Process a Stripe payment event and create a license if applicable.
+ */
+async function handlePaymentEvent(db, event) {
+  const MONTHLY_PRICE_ID = process.env.STRIPE_PRICE_ID_MONTHLY
+  const LIFETIME_PRICE_ID = process.env.STRIPE_PRICE_ID_LIFETIME
+
+  let email, customerId, paymentId, priceId, metadata
+  let appKey = null
+  let loginUsername = null
+
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object
+    email = session.customer_details?.email || session.customer_email
+    customerId = session.customer
+    paymentId = session.payment_intent || session.id
+    metadata = session.metadata || {}
+
+    // For SEPA/bank transfers, the payment may not be complete yet
+    // Only process if payment_status is 'paid'
+    if (session.payment_status !== 'paid') {
+      logVerification(db, {
+        action: 'webhook_deferred',
+        details: `Payment not yet confirmed (status: ${session.payment_status}). Will process on payment_intent.succeeded.`,
+      })
+      return {deferred: true, reason: 'Payment not yet confirmed'}
+    }
+
+    // ── Extract custom fields (App Key, Login Username) ──
+    // Payment links with custom fields populate session.custom_fields[]
+    // Each has: { key, label, type, text: { value } }
+    const customFields = session.custom_fields || []
+    for (const field of customFields) {
+      const key = (field.key || field.label?.custom || '').toLowerCase()
+      const value = field.text?.value || field.dropdown?.value || ''
+      if (key.includes('app') && key.includes('key')) {
+        appKey = value.trim()
+      } else if (key.includes('login') || key.includes('username')) {
+        loginUsername = value.trim()
+      }
+    }
+
+    // ── Get price ID from line items ──
+    // checkout.session.completed does NOT include line_items by default
+    // We need to expand them via the Stripe API
+    try {
+      const stripe = new Stripe(process.env.STRIPE_SECRET_KEY)
+      const sessionWithItems = await stripe.checkout.sessions.retrieve(session.id, {
+        expand: ['line_items'],
+      })
+      if (sessionWithItems.line_items?.data?.[0]?.price?.id) {
+        priceId = sessionWithItems.line_items.data[0].price.id
+      }
+    } catch (err) {
+      console.error(`[webhook] Failed to fetch line items: ${err.message}`)
+      // Fall back to metadata
+    }
+
+    // Fall back to metadata-based price ID
+    if (!priceId) {
+      priceId = metadata.price_id || extractPriceIdFromSession(session)
+    }
+  } else if (event.type === 'payment_intent.succeeded') {
+    const intent = event.data.object
+    email = intent.receipt_email || intent.metadata?.email
+    customerId = intent.customer
+    paymentId = intent.id
+    metadata = intent.metadata || {}
+    priceId = metadata.price_id
+    appKey = metadata.app_key || null
+    loginUsername = metadata.login_username || null
+  }
+
+  // Use loginUsername + appKey as primary identity
+  // Email is stored separately for consultation only
+  const normalizedUsername = (loginUsername || '').toLowerCase().trim()
+  const normalizedAppKey = (appKey || '').trim()
+
+  // Determine product type from price ID
+  const productType = resolveProductType(priceId, metadata, {MONTHLY_PRICE_ID, LIFETIME_PRICE_ID})
+
+  if (!productType) {
+    // Not a personal-software product — ignore
+    logVerification(db, {
+      action: 'webhook_ignored',
+      details: `Price ID ${priceId} does not match any product (monthly: ${MONTHLY_PRICE_ID}, lifetime: ${LIFETIME_PRICE_ID})`,
+    })
+    return {ignored: true, reason: 'Not a matching product'}
+  }
+
+  if (!normalizedUsername || !normalizedAppKey) {
+    logVerification(db, {
+      action: 'webhook_error',
+      details: `Missing required fields — loginUsername: "${loginUsername || ''}", appKey: "${appKey || ''}"`,
+    })
+    return {error: true, reason: 'Login Username and App Key are both required in payment custom fields'}
+  }
+
+  // Idempotency check — don't process the same payment twice
+  const existing = findLicenseByPaymentId(db, paymentId)
+  if (existing) {
+    logVerification(db, {
+      licenseId: existing.id,
+      action: 'webhook_duplicate',
+      details: `Payment ${paymentId} already processed`,
+    })
+    return {duplicate: true}
+  }
+
+  // ── Carry-over logic: revoke old licenses + add remaining days ──
+  const {revokedCount, carryOverDays} = revokeAndCarryOver(db, normalizedUsername, normalizedAppKey)
+  if (revokedCount > 0) {
+    logVerification(db, {
+      action: 'license_carryover',
+      details: `Revoked ${revokedCount} old license(s) for ${normalizedUsername}, carrying over ${carryOverDays} day(s)`,
+    })
+  }
+
+  // Calculate expiry with carry-over (lifetime doesn't carry over — already infinite)
+  const baseDays = productType === 'lifetime' ? 0 : carryOverDays
+  const expiresAt = calculateExpiry(productType, baseDays)
+
+  // Create license — loginUsername + appKey are the identity, email is just for consultation
+  const result = createLicense(db, {
+    loginUsername: normalizedUsername,
+    appKey: normalizedAppKey,
+    email: email || null,
+    stripeCustomerId: customerId,
+    stripePaymentId: paymentId,
+    productType,
+    expiresAt,
+  })
+
+  logVerification(db, {
+    licenseId: result.lastInsertRowid,
+    action: 'license_created',
+    details: `Product: ${productType}, loginUsername: ${normalizedUsername}, appKey: ${normalizedAppKey}${baseDays > 0 ? `, +${baseDays}d carry-over` : ''}, expires: ${expiresAt}`,
+  })
+
+  console.log(
+    `[webhook] ✅ License created for ${normalizedUsername} (appKey: ${normalizedAppKey}) — ${productType}${baseDays > 0 ? ` (+${baseDays}d carry-over)` : ''} (expires ${expiresAt})`,
+  )
+
+  // ── Call Invoicexpress and Telegram ──
+  const amountObj = event.data.object
+  const amountPaidCents = amountObj.amount_total || amountObj.amount || 0
+  const amountPaidDec = amountPaidCents / 100
+  const currencyStr = (amountObj.currency || 'eur').toUpperCase()
+  const customerCountry = amountObj.customer_details?.address?.country || null
+  const countryFullName = countries.find(c => c.code2 === customerCountry)?.name
+
+  let invoice = null
+  try {
+    const isLifetime = productType === 'lifetime'
+    invoice = await createInvoiceXpress({
+      itemName: `Personal Software ${isLifetime ? 'Lifetime' : 'Monthly'} License`,
+      itemDescription: `License for user ${normalizedUsername}`,
+      clientReference: customerId,
+      clientEmail: email || '',
+      clientName: normalizedUsername,
+      amount: amountPaidDec,
+      sendByEmail: true,
+      currencyCode: currencyStr,
+      country: countryFullName,
+    })
+  } catch (e) {
+    console.error(`[webhook] Invoicexpress integration error:`, e)
+  }
+
+  try {
+    const licenseEmoji = productType === 'lifetime' ? '🎰 🤑' : '🎉 💰'
+    await notifyNewLicensePurchased({
+      licenseName: `${licenseEmoji} Personal Software ${productType === 'lifetime' ? 'Lifetime' : 'Monthly'} ${licenseEmoji}`,
+      price: amountPaidDec.toFixed(2),
+      currency: currencyStr,
+      invoice: invoice,
+      payment: true,
+      customer: {email: email, country: customerCountry},
+      endDate: productType === 'lifetime' ? undefined : expiresAt.split('T')[0],
+    })
+  } catch (e) {
+    console.error(`[webhook] Telegram integration error:`, e)
+  }
+
+  return {created: true, licenseId: result.lastInsertRowid, carryOverDays: baseDays}
+}
+
+/**
+ * Try to extract price ID from checkout session line items.
+ * Line items might be in session.line_items or need to be extracted from metadata.
+ */
+function extractPriceIdFromSession(session) {
+  // Check session metadata first
+  if (session.metadata?.price_id) return session.metadata.price_id
+
+  // Line items may be expanded in the session
+  if (session.line_items?.data?.[0]?.price?.id) {
+    return session.line_items.data[0].price.id
+  }
+
+  return null
+}
+
+/**
+ * Resolve product type from priceId or metadata.
+ * Returns 'monthly' | 'lifetime' | null (if not a matching product)
+ */
+export function resolveProductType(priceId, metadata, priceIds) {
+  // Primary: Check by price ID (most reliable — set on the Stripe price itself)
+  if (priceId) {
+    if (priceId === priceIds.MONTHLY_PRICE_ID) return 'monthly'
+    if (priceId === priceIds.LIFETIME_PRICE_ID) return 'lifetime'
+  }
+
+  // Fallback: Check by metadata (if manually set on the payment link)
+  if (metadata?.product === 'personal-software') {
+    if (metadata?.plan === 'monthly') return 'monthly'
+    if (metadata?.plan === 'lifetime') return 'lifetime'
+  }
+
+  return null
+}
+
+/**
+ * Calculate license expiry date.
+ * @param {string} productType — 'monthly' or 'lifetime'
+ * @param {number} [extraDays=0] — additional days to add (carry-over from old license)
+ */
+export function calculateExpiry(productType, extraDays = 0) {
+  const now = new Date()
+  if (productType === 'lifetime') {
+    // 100 years — effectively permanent
+    now.setFullYear(now.getFullYear() + 100)
+  } else {
+    // monthly — 30 days + carry-over
+    now.setDate(now.getDate() + 30 + extraDays)
+  }
+  return now.toISOString()
+}

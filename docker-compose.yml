@@ -1,0 +1,13 @@
+services:
+  backend:
+    build: .
+    container_name: personal-software-backend
+    restart: unless-stopped
+    ports:
+      - '6767:6767'
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
