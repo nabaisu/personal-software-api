@@ -73,6 +73,38 @@ describe('Webhook helpers', () => {
       const years = diff / (1000 * 60 * 60 * 24 * 365)
       expect(years).toBeGreaterThan(99)
     })
+
+    it('should multiply 30 days by quantity 2 (60 days)', () => {
+      const expiry = calculateExpiry('monthly', 0, 2)
+      const diff = new Date(expiry) - new Date()
+      const days = diff / (1000 * 60 * 60 * 24)
+      expect(days).toBeGreaterThan(59)
+      expect(days).toBeLessThan(61)
+    })
+
+    it('should multiply 30 days by quantity 3 (90 days)', () => {
+      const expiry = calculateExpiry('monthly', 0, 3)
+      const diff = new Date(expiry) - new Date()
+      const days = diff / (1000 * 60 * 60 * 24)
+      expect(days).toBeGreaterThan(89)
+      expect(days).toBeLessThan(91)
+    })
+
+    it('should combine quantity with carry-over days', () => {
+      const expiry = calculateExpiry('monthly', 10, 2)
+      const diff = new Date(expiry) - new Date()
+      const days = diff / (1000 * 60 * 60 * 24)
+      // 30 * 2 + 10 = 70 days
+      expect(days).toBeGreaterThan(69)
+      expect(days).toBeLessThan(71)
+    })
+
+    it('should ignore quantity for lifetime', () => {
+      const expiry = calculateExpiry('lifetime', 0, 5)
+      const diff = new Date(expiry) - new Date()
+      const years = diff / (1000 * 60 * 60 * 24 * 365)
+      expect(years).toBeGreaterThan(99)
+    })
   })
 })
 

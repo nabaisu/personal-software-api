@@ -60,6 +60,7 @@ async function handlePaymentEvent(db, event) {
   const LIFETIME_PRICE_ID = process.env.STRIPE_PRICE_ID_LIFETIME
 
   let email, customerId, paymentId, priceId, metadata
+  let quantity = 1
   let appKey = null
   let loginUsername = null
 
@@ -102,8 +103,12 @@ async function handlePaymentEvent(db, event) {
       const sessionWithItems = await stripe.checkout.sessions.retrieve(session.id, {
         expand: ['line_items'],
       })
-      if (sessionWithItems.line_items?.data?.[0]?.price?.id) {
-        priceId = sessionWithItems.line_items.data[0].price.id
+      const firstItem = sessionWithItems.line_items?.data?.[0]
+      if (firstItem?.price?.id) {
+        priceId = firstItem.price.id
+      }
+      if (firstItem?.quantity && firstItem.quantity > 0) {
+        quantity = firstItem.quantity
       }
     } catch (err) {
       console.error(`[webhook] Failed to fetch line items: ${err.message}`)
@@ -123,6 +128,9 @@ async function handlePaymentEvent(db, event) {
     priceId = metadata.price_id
     appKey = metadata.app_key || null
     loginUsername = metadata.login_username || null
+    if (metadata.quantity && Number(metadata.quantity) > 0) {
+      quantity = Number(metadata.quantity)
+    }
   }
 
   // Use loginUsername + appKey as primary identity
@@ -172,7 +180,7 @@ async function handlePaymentEvent(db, event) {
 
   // Calculate expiry with carry-over (lifetime doesn't carry over — already infinite)
   const baseDays = productType === 'lifetime' ? 0 : carryOverDays
-  const expiresAt = calculateExpiry(productType, baseDays)
+  const expiresAt = calculateExpiry(productType, baseDays, quantity)
 
   // Create license — loginUsername + appKey are the identity, email is just for consultation
   const result = createLicense(db, {
@@ -188,11 +196,11 @@ async function handlePaymentEvent(db, event) {
   logVerification(db, {
     licenseId: result.lastInsertRowid,
     action: 'license_created',
-    details: `Product: ${productType}, loginUsername: ${normalizedUsername}, appKey: ${normalizedAppKey}${baseDays > 0 ? `, +${baseDays}d carry-over` : ''}, expires: ${expiresAt}`,
+    details: `Product: ${productType}, qty: ${quantity}, loginUsername: ${normalizedUsername}, appKey: ${normalizedAppKey}${baseDays > 0 ? `, +${baseDays}d carry-over` : ''}, expires: ${expiresAt}`,
   })
 
   console.log(
-    `[webhook] ✅ License created for ${normalizedUsername} (appKey: ${normalizedAppKey}) — ${productType}${baseDays > 0 ? ` (+${baseDays}d carry-over)` : ''} (expires ${expiresAt})`,
+    `[webhook] ✅ License created for ${normalizedUsername} (appKey: ${normalizedAppKey}) — ${productType} x${quantity}${baseDays > 0 ? ` (+${baseDays}d carry-over)` : ''} (expires ${expiresAt})`,
   )
 
   // ── Call Invoicexpress and Telegram ──
@@ -279,15 +287,17 @@ export function resolveProductType(priceId, metadata, priceIds) {
  * Calculate license expiry date.
  * @param {string} productType — 'monthly' or 'lifetime'
  * @param {number} [extraDays=0] — additional days to add (carry-over from old license)
+ * @param {number} [quantity=1] — number of months purchased (multiplies the 30-day base)
  */
-export function calculateExpiry(productType, extraDays = 0) {
+export function calculateExpiry(productType, extraDays = 0, quantity = 1) {
   const now = new Date()
   if (productType === 'lifetime') {
     // 100 years — effectively permanent
     now.setFullYear(now.getFullYear() + 100)
   } else {
-    // monthly — 30 days + carry-over
-    now.setDate(now.getDate() + 30 + extraDays)
+    // monthly — 30 days × quantity + carry-over
+    const totalDays = 30 * quantity + extraDays
+    now.setDate(now.getDate() + totalDays)
   }
   return now.toISOString()
 }
