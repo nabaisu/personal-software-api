@@ -213,12 +213,22 @@ async function handlePaymentEvent(db, event) {
   const countryFullName = countries.find(c => c.code2 === customerCountry)?.name
 
   const getTaxConfig = () => {
+    // If Stripe didn't charge tax, we use the M99 exemption code
     if (!taxAmountCents) {
       return {taxExemptionCode: 'M99'}
     }
 
+    // If tax was charged, we pass the correct InvoiceXpress Tax Name based on the country
+    if (customerCountry === 'PT') {
+      return {taxName: 'IVA23'}
+    }
+
+    if (customerCountry === 'GR') {
+      return {taxName: 'EL'}
+    }
+
     if (customerCountry) {
-      return {taxName: customerCountry === 'GR' ? 'EL' : customerCountry}
+      return {taxName: customerCountry}
     }
 
     return {}
