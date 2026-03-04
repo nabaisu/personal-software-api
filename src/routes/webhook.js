@@ -211,6 +211,49 @@ async function handlePaymentEvent(db, event) {
   const customerCountry = amountObj.customer_details?.address?.country || null
   const countryFullName = countries.find(c => c.code2 === customerCountry)?.name
 
+  const getTaxConfig = () => {
+    // Map ISO 2-letter country codes to InvoiceXpress Tax Names
+    const EU_TAX_CODES = {
+      PT: 'IVA23',
+      AT: 'AT',
+      BE: 'BE',
+      BG: 'BG',
+      CY: 'CY',
+      CZ: 'CZ',
+      DE: 'DE',
+      DK: 'DK',
+      EE: 'EE',
+      GR: 'EL',
+      ES: 'ES',
+      FI: 'FI',
+      FR: 'FR',
+      HR: 'HR',
+      HU: 'HU',
+      IE: 'IE',
+      IT: 'IT',
+      LT: 'LT',
+      LU: 'LU',
+      LV: 'LV',
+      MT: 'MT',
+      NL: 'NL',
+      PL: 'PL',
+      RO: 'RO',
+      SE: 'SE',
+      SI: 'SI',
+      SK: 'SK',
+    }
+
+    const taxName = customerCountry ? EU_TAX_CODES[customerCountry] : undefined
+
+    // If it's an EU country, we apply the specific VAT using taxName
+    if (taxName) {
+      return {taxName}
+    }
+
+    // If outside the EU or country unknown, we apply 0% VAT with a valid exemption code (M99 = Not subject to VAT)
+    return {taxExemptionCode: 'M99'}
+  }
+
   let invoice = null
   try {
     const isLifetime = productType === 'lifetime'
@@ -224,6 +267,7 @@ async function handlePaymentEvent(db, event) {
       sendByEmail: true,
       currencyCode: currencyStr,
       country: countryFullName,
+      ...getTaxConfig(),
     })
   } catch (e) {
     console.error(`[webhook] Invoicexpress integration error:`, e)
