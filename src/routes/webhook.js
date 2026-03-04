@@ -207,51 +207,21 @@ async function handlePaymentEvent(db, event) {
   const amountObj = event.data.object
   const amountPaidCents = amountObj.amount_total || amountObj.amount || 0
   const amountPaidDec = amountPaidCents / 100
+  const taxAmountCents = amountObj.total_details?.amount_tax || 0
   const currencyStr = (amountObj.currency || 'eur').toUpperCase()
   const customerCountry = amountObj.customer_details?.address?.country || null
   const countryFullName = countries.find(c => c.code2 === customerCountry)?.name
 
   const getTaxConfig = () => {
-    // Map ISO 2-letter country codes to InvoiceXpress Tax Names
-    const EU_TAX_CODES = {
-      PT: 'IVA23',
-      AT: 'AT',
-      BE: 'BE',
-      BG: 'BG',
-      CY: 'CY',
-      CZ: 'CZ',
-      DE: 'DE',
-      DK: 'DK',
-      EE: 'EE',
-      GR: 'EL',
-      ES: 'ES',
-      FI: 'FI',
-      FR: 'FR',
-      HR: 'HR',
-      HU: 'HU',
-      IE: 'IE',
-      IT: 'IT',
-      LT: 'LT',
-      LU: 'LU',
-      LV: 'LV',
-      MT: 'MT',
-      NL: 'NL',
-      PL: 'PL',
-      RO: 'RO',
-      SE: 'SE',
-      SI: 'SI',
-      SK: 'SK',
+    if (!taxAmountCents) {
+      return {taxExemptionCode: 'M99'}
     }
 
-    const taxName = customerCountry ? EU_TAX_CODES[customerCountry] : undefined
-
-    // If it's an EU country, we apply the specific VAT using taxName
-    if (taxName) {
-      return {taxName}
+    if (customerCountry) {
+      return {taxName: customerCountry === 'GR' ? 'EL' : customerCountry}
     }
 
-    // If outside the EU or country unknown, we apply 0% VAT with a valid exemption code (M99 = Not subject to VAT)
-    return {taxExemptionCode: 'M99'}
+    return {}
   }
 
   let invoice = null

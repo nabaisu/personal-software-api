@@ -32,13 +32,10 @@ export async function createInvoiceXpress({
   const rateString = Number(rate).toFixed(5)
   const amountString = Number(amount).toFixed(2)
 
-  const now = new Date()
-  const todayDateStr = `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()}`
-
   const invoiceData = {
-    invoice_receipt: {
-      date: todayDateStr,
-      due_date: todayDateStr,
+    invoice: {
+      date: new Date().toLocaleDateString('en-GB'), // Current date in dd/mm/yyyy format
+      due_date: new Date().toLocaleDateString('en-GB'), // Current date in dd/mm/yyyy format
       client: {
         name: clientName,
         code: clientReference,
@@ -95,19 +92,20 @@ export async function createInvoiceXpress({
       throw new Error(`InvoiceXpress creation failed: ${response.status}`)
     }
 
-    console.log('Invoice created successfully:', data?.invoice_receipt?.id)
+    console.log('Invoice created successfully:', data?.invoice_receipt?.id || data?.invoice?.id)
 
     // Finalize invoice
-    if (data?.invoice_receipt?.id) {
+    if (data?.invoice_receipt?.id || data?.invoice?.id) {
+      const documentId = data?.invoice_receipt?.id || data?.invoice?.id
       const finalisedInvoice = await changeInvoiceStatus({
-        invoiceId: data.invoice_receipt.id,
+        invoiceId: documentId,
         status: 'finalized',
       })
       console.log('Invoice finalised successfully:', finalisedInvoice?.invoice_receipt?.state || 'finalized')
 
       if (sendByEmail) {
         await sendInvoiceByEmail({
-          documentId: data.invoice_receipt.id,
+          documentId: documentId,
           email: clientEmail,
           itemDescription,
           itemName,
@@ -115,7 +113,7 @@ export async function createInvoiceXpress({
       }
     }
 
-    return data?.invoice_receipt
+    return data?.invoice_receipt || data?.invoice
   } catch (error) {
     console.error('Error creating invoice:', error)
     throw error
@@ -130,7 +128,7 @@ export async function changeInvoiceStatus({invoiceId, status}) {
   const url = `https://${accountName}.app.invoicexpress.com/${documentType}/${invoiceId}/change-state.json?api_key=${apiKey}`
 
   const statusData = {
-    invoice_receipt: {
+    invoice: {
       state: status,
     },
   }
@@ -138,7 +136,7 @@ export async function changeInvoiceStatus({invoiceId, status}) {
   console.log('Changing invoice status to:', status, url)
 
   const options = {
-    method: 'PUT',
+    method: 'POST',
     headers: {
       accept: 'application/json',
       'content-type': 'application/json',
