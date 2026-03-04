@@ -49,8 +49,8 @@ export async function notifyNewLicensePurchased({
     (!invoice ? '' : `- Invoice:    ${invoice ? '✅' : '❌'}\n`) +
     (!payment ? '' : `- Payment: ${payment ? '✅' : '❌'}`)
 
-  if (process.env.NODE_ENV !== 'production') {
-    console.log('Telegram message\n', message)
+  if (process.env.NODE_ENV?.trim() !== 'production') {
+    console.log(`Telegram message (NODE_ENV is '${process.env.NODE_ENV}')\n`, message)
     return
   }
 

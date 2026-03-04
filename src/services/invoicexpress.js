@@ -32,10 +32,13 @@ export async function createInvoiceXpress({
   const rateString = Number(rate).toFixed(5)
   const amountString = Number(amount).toFixed(2)
 
+  const now = new Date()
+  const todayDateStr = `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()}`
+
   const invoiceData = {
-    invoice: {
-      date: new Date().toLocaleDateString('en-GB'), // Current date in dd/mm/yyyy format
-      due_date: new Date().toLocaleDateString('en-GB'), // Current date in dd/mm/yyyy format
+    invoice_receipt: {
+      date: todayDateStr,
+      due_date: todayDateStr,
       client: {
         name: clientName,
         code: clientReference,
@@ -127,7 +130,7 @@ export async function changeInvoiceStatus({invoiceId, status}) {
   const url = `https://${accountName}.app.invoicexpress.com/${documentType}/${invoiceId}/change-state.json?api_key=${apiKey}`
 
   const statusData = {
-    invoice: {
+    invoice_receipt: {
       state: status,
     },
   }
