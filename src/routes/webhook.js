@@ -1,9 +1,9 @@
-import {Router} from 'express'
+import { Router } from 'express'
 import Stripe from 'stripe'
-import {createLicense, findLicenseByPaymentId, revokeAndCarryOver, logVerification} from '../db.js'
-import {createInvoiceXpress} from '../services/invoicexpress.js'
-import {notifyNewLicensePurchased} from '../services/telegram.js'
-import {countries} from '../services/countries.js'
+import { createLicense, findLicenseByPaymentId, revokeAndCarryOver, logVerification } from '../db.js'
+import { createInvoiceXpress } from '../services/invoicexpress.js'
+import { notifyNewLicensePurchased } from '../services/telegram.js'
+import { countries } from '../services/countries.js'
 /**
  * Creates the Stripe webhook router.
  * @param {import('better-sqlite3').Database} db
@@ -18,7 +18,7 @@ export function createWebhookRouter(db) {
 
     if (!webhookSecret) {
       console.error('[webhook] STRIPE_WEBHOOK_SECRET not configured')
-      return res.status(500).json({error: 'Webhook secret not configured'})
+      return res.status(500).json({ error: 'Webhook secret not configured' })
     }
 
     let event
@@ -27,7 +27,7 @@ export function createWebhookRouter(db) {
       event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret)
     } catch (err) {
       console.error(`[webhook] Signature verification failed: ${err.message}`)
-      return res.status(400).json({error: `Webhook signature verification failed`})
+      return res.status(400).json({ error: `Webhook signature verification failed` })
     }
 
     // We handle two event types:
@@ -37,15 +37,15 @@ export function createWebhookRouter(db) {
 
     if (!handledTypes.includes(event.type)) {
       // Acknowledge but ignore other event types
-      return res.json({received: true, handled: false})
+      return res.json({ received: true, handled: false })
     }
 
     try {
       const result = await handlePaymentEvent(db, event)
-      return res.json({received: true, handled: true, ...result})
+      return res.json({ received: true, handled: true, ...result })
     } catch (err) {
       console.error(`[webhook] Error handling ${event.type}: ${err.message}`)
-      return res.status(500).json({error: 'Internal error processing webhook'})
+      return res.status(500).json({ error: 'Internal error processing webhook' })
     }
   })
 
@@ -78,7 +78,7 @@ async function handlePaymentEvent(db, event) {
         action: 'webhook_deferred',
         details: `Payment not yet confirmed (status: ${session.payment_status}). Will process on payment_intent.succeeded.`,
       })
-      return {deferred: true, reason: 'Payment not yet confirmed'}
+      return { deferred: true, reason: 'Payment not yet confirmed' }
     }
 
     // ── Extract custom fields (App Key, Login Username) ──
@@ -139,7 +139,7 @@ async function handlePaymentEvent(db, event) {
   const normalizedAppKey = (appKey || '').trim()
 
   // Determine product type from price ID
-  const productType = resolveProductType(priceId, metadata, {MONTHLY_PRICE_ID, LIFETIME_PRICE_ID})
+  const productType = resolveProductType(priceId, metadata, { MONTHLY_PRICE_ID, LIFETIME_PRICE_ID })
 
   if (!productType) {
     // Not a personal-software product — ignore
@@ -147,7 +147,7 @@ async function handlePaymentEvent(db, event) {
       action: 'webhook_ignored',
       details: `Price ID ${priceId} does not match any product (monthly: ${MONTHLY_PRICE_ID}, lifetime: ${LIFETIME_PRICE_ID})`,
     })
-    return {ignored: true, reason: 'Not a matching product'}
+    return { ignored: true, reason: 'Not a matching product' }
   }
 
   if (!normalizedUsername || !normalizedAppKey) {
@@ -155,7 +155,7 @@ async function handlePaymentEvent(db, event) {
       action: 'webhook_error',
       details: `Missing required fields — loginUsername: "${loginUsername || ''}", appKey: "${appKey || ''}"`,
     })
-    return {error: true, reason: 'Login Username and App Key are both required in payment custom fields'}
+    return { error: true, reason: 'Login Username and App Key are both required in payment custom fields' }
   }
 
   // Idempotency check — don't process the same payment twice
@@ -166,11 +166,11 @@ async function handlePaymentEvent(db, event) {
       action: 'webhook_duplicate',
       details: `Payment ${paymentId} already processed`,
     })
-    return {duplicate: true}
+    return { duplicate: true }
   }
 
   // ── Carry-over logic: revoke old licenses + add remaining days ──
-  const {revokedCount, carryOverDays} = revokeAndCarryOver(db, normalizedUsername, normalizedAppKey)
+  const { revokedCount, carryOverDays } = revokeAndCarryOver(db, normalizedUsername, normalizedAppKey)
   if (revokedCount > 0) {
     logVerification(db, {
       action: 'license_carryover',
@@ -207,31 +207,37 @@ async function handlePaymentEvent(db, event) {
   const amountObj = event.data.object
   const amountPaidCents = amountObj.amount_total || amountObj.amount || 0
   const amountPaidDec = amountPaidCents / 100
-  const taxAmountCents = amountObj.total_details?.amount_tax || 0
   const currencyStr = (amountObj.currency || 'eur').toUpperCase()
   const customerCountry = amountObj.customer_details?.address?.country || null
   const countryFullName = countries.find(c => c.code2 === customerCountry)?.name
 
+  // EU member state country codes (ISO 3166-1 alpha-2)
+  const EU_COUNTRY_CODES = new Set([
+    'AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR',
+    'DE', 'GR', 'HU', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL',
+    'PL', 'PT', 'RO', 'SK', 'SI', 'ES', 'SE',
+  ])
+
   const getTaxConfig = () => {
-    // If Stripe didn't charge tax, we use the M99 exemption code
-    if (!taxAmountCents) {
-      return {taxExemptionCode: 'M99'}
-    }
-
-    // If tax was charged, we pass the correct InvoiceXpress Tax Name based on the country
+    // Portugal → 23% IVA
     if (customerCountry === 'PT') {
-      return {taxName: 'IVA23'}
+      return { taxName: 'IVA23' }
     }
 
-    if (customerCountry === 'GR') {
-      return {taxName: 'EL'}
+    // EU countries → country-specific VAT rate
+    // Greece uses 'EL' as fiscal code instead of 'GR'
+    if (customerCountry && EU_COUNTRY_CODES.has(customerCountry)) {
+      const taxName = customerCountry === 'GR' ? 'EL' : customerCountry
+      return { taxName }
     }
 
+    // Outside EU → Tax exemption M14 (export of services)
     if (customerCountry) {
-      return {taxName: customerCountry}
+      return { taxExemptionCode: 'M14' }
     }
 
-    return {}
+    // Unknown country → fallback exemption
+    return { taxExemptionCode: 'M99' }
   }
 
   let invoice = null
@@ -261,14 +267,14 @@ async function handlePaymentEvent(db, event) {
       currency: currencyStr,
       invoice: invoice,
       payment: true,
-      customer: {email: email, country: customerCountry},
+      customer: { email: email, country: customerCountry },
       endDate: productType === 'lifetime' ? undefined : expiresAt.split('T')[0],
     })
   } catch (e) {
     console.error(`[webhook] Telegram integration error:`, e)
   }
 
-  return {created: true, licenseId: result.lastInsertRowid, carryOverDays: baseDays}
+  return { created: true, licenseId: result.lastInsertRowid, carryOverDays: baseDays }
 }
 
 /**

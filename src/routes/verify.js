@@ -59,7 +59,7 @@ export function createVerifyRouter(db) {
         })
         return res.status(403).json({
           verified: false,
-          message: 'No active license found for this account. Please purchase access at on the link below',
+          message: 'No active license found for this account. Please purchase access at personal-software.com',
         })
       }
 
