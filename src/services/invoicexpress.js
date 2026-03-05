@@ -1,4 +1,4 @@
-import {countries} from './countries.js'
+import { countries } from './countries.js'
 
 export async function createInvoiceXpress({
   itemName,
@@ -44,11 +44,11 @@ export async function createInvoiceXpress({
         postal_code: postalCode || '0000-000',
         city: city || 'Unknown',
         country: country || 'Unknown',
-        ...(vatNumber && {fiscal_id: vatNumber}),
+        ...(vatNumber && { fiscal_id: vatNumber }),
       },
       currency_code: currencyCode,
       rate: rateString, // Assuming rate is a multiplier for the amount
-      ...(taxExemptionCode && {tax_exemption: taxExemptionCode}),
+      ...(taxExemptionCode && { tax_exemption: taxExemptionCode }),
       items: [
         {
           name: itemName,
@@ -120,7 +120,7 @@ export async function createInvoiceXpress({
   }
 }
 
-export async function changeInvoiceStatus({invoiceId, status}) {
+export async function changeInvoiceStatus({ invoiceId, status }) {
   const apiKey = process.env.INVOICEXPRESS_APIKEY
   const accountName = process.env.INVOICEXPRESS_USER
   const documentType = 'invoice_receipts'
@@ -155,16 +155,16 @@ export async function changeInvoiceStatus({invoiceId, status}) {
   }
 }
 
-export async function sendInvoiceByEmail({documentId, email, itemName, itemDescription}) {
+export async function sendInvoiceByEmail({ documentId, email, itemName, itemDescription }) {
   const apiKey = process.env.INVOICEXPRESS_APIKEY
   const accountName = process.env.INVOICEXPRESS_USER
-  const documentType = 'invoices'
+  const documentType = 'invoice_receipts'
 
   const url = `https://${accountName}.app.invoicexpress.com/${documentType}/${documentId}/email-document.json?api_key=${apiKey}`
 
   const emailData = {
     message: {
-      client: {email: email, save: '0'},
+      client: { email: email, save: '0' },
       subject: 'Invoice from Personal Software',
       body: `Please find attached the invoice for the ${itemName} subscription.\n\n${itemDescription}`,
       // bcc: 'nabaisaomar@gmail.com',
@@ -186,7 +186,7 @@ export async function sendInvoiceByEmail({documentId, email, itemName, itemDescr
   try {
     const response = await fetch(url, options)
     const text = await response.text()
-    const data = text ? JSON.parse(text) : {}
+    const data = text && text.trim() ? JSON.parse(text) : {}
     console.log('Invoice sent by email successfully')
     return data
   } catch (error) {

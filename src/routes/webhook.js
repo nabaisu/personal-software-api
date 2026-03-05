@@ -208,8 +208,11 @@ async function handlePaymentEvent(db, event) {
   const amountPaidCents = amountObj.amount_total || amountObj.amount || 0
   const amountPaidDec = amountPaidCents / 100
   const currencyStr = (amountObj.currency || 'eur').toUpperCase()
-  const customerCountry = amountObj.customer_details?.address?.country || null
+  const customerDetails = amountObj.customer_details || {}
+  const customerAddress = customerDetails.address || {}
+  const customerCountry = customerAddress.country || null
   const countryFullName = countries.find(c => c.code2 === customerCountry)?.name
+  const customerName = customerDetails.name || normalizedUsername
 
   // EU member state country codes (ISO 3166-1 alpha-2)
   const EU_COUNTRY_CODES = new Set([
@@ -248,11 +251,14 @@ async function handlePaymentEvent(db, event) {
       itemDescription: `License for user ${normalizedUsername}`,
       clientReference: customerId,
       clientEmail: email || '',
-      clientName: normalizedUsername,
+      clientName: customerName,
       amount: amountPaidDec,
       sendByEmail: true,
       currencyCode: currencyStr,
       country: countryFullName,
+      address: [customerAddress.line1, customerAddress.line2].filter(Boolean).join(', ') || undefined,
+      postalCode: customerAddress.postal_code || undefined,
+      city: customerAddress.city || undefined,
       ...getTaxConfig(),
     })
   } catch (e) {
