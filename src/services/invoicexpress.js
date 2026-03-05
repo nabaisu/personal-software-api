@@ -1,4 +1,56 @@
-import { countries } from './countries.js'
+
+/**
+ * Find an existing InvoiceXpress client by their code (email) and update their
+ * details with fresh data from the current Stripe payment.
+ * If the client doesn't exist yet, InvoiceXpress will create them automatically
+ * when the invoice is created — no action needed.
+ */
+async function upsertClient({ apiKey, accountName, clientEmail, clientName, address, postalCode, city, country, vatNumber }) {
+  try {
+    const findUrl = `https://${accountName}.app.invoicexpress.com/clients/find-by-code.json?code=${encodeURIComponent(clientEmail)}&api_key=${apiKey}`
+    const findRes = await fetch(findUrl, { headers: { accept: 'application/json' } })
+
+    if (!findRes.ok) {
+      // 404 = client doesn't exist yet, that's fine — invoice creation will create them
+      if (findRes.status === 404) return
+      console.warn(`[InvoiceXpress] upsertClient lookup failed with status ${findRes.status}`)
+      return
+    }
+
+    const findText = await findRes.text()
+    const findData = findText && findText.trim() ? JSON.parse(findText) : null
+    const existingClient = findData?.client
+    if (!existingClient?.id) return
+
+    console.log(`[InvoiceXpress] Updating existing client ${existingClient.id} with fresh address/country data`)
+
+    const updateUrl = `https://${accountName}.app.invoicexpress.com/clients/${existingClient.id}.json?api_key=${apiKey}`
+    const updateBody = {
+      client: {
+        name: clientName,
+        ...(address && { address }),
+        ...(postalCode && { postal_code: postalCode }),
+        ...(city && { city }),
+        ...(country && { country }),
+        ...(vatNumber && { fiscal_id: vatNumber }),
+      },
+    }
+
+    const updateRes = await fetch(updateUrl, {
+      method: 'PUT',
+      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      body: JSON.stringify(updateBody),
+    })
+
+    if (!updateRes.ok) {
+      const errText = await updateRes.text()
+      console.warn(`[InvoiceXpress] upsertClient update failed (${updateRes.status}):`, errText)
+    }
+  } catch (err) {
+    // Don't block invoice creation if upsert fails
+    console.warn('[InvoiceXpress] upsertClient error (non-fatal):', err.message)
+  }
+}
 
 export async function createInvoiceXpress({
   itemName,
@@ -25,6 +77,10 @@ export async function createInvoiceXpress({
     console.warn('InvoiceXpress credentials missing, skipping invoice creation.')
     return null
   }
+
+  // Always sync client data before creating the invoice so stale fields
+  // (e.g. an old country from a previous purchase) don't bleed into the new invoice.
+  await upsertClient({ apiKey, accountName, clientEmail, clientName, address, postalCode, city, country, vatNumber })
 
   const documentType = 'invoice_receipts'
   const url = `https://${accountName}.app.invoicexpress.com/${documentType}.json?api_key=${apiKey}`
