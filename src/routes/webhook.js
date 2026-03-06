@@ -236,7 +236,7 @@ async function handlePaymentEvent(db, event) {
 
     // Outside EU → Tax exemption M14 (export of services)
     if (customerCountry) {
-      return { taxExemptionCode: 'M14' }
+      return { taxExemptionCode: 'M99' }
     }
 
     // Unknown country → fallback exemption
