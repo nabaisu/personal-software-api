@@ -3,42 +3,44 @@ import {resolveProductType, calculateExpiry} from '../src/routes/webhook.js'
 import {createDb, createLicense, revokeAndCarryOver, findActiveLicense} from '../src/db.js'
 
 describe('Webhook helpers', () => {
-  const priceIds = {
-    MONTHLY_PRICE_ID: 'price_monthly_123',
-    LIFETIME_PRICE_ID: 'price_lifetime_456',
-  }
+  const TARGET_PRODUCT_ID = 'prod_personal123'
 
   describe('resolveProductType', () => {
-    it('should resolve monthly product by price ID', () => {
-      expect(resolveProductType('price_monthly_123', {}, priceIds)).toBe('monthly')
+    it('should resolve temporary (monthly) product by matching product ID', () => {
+      expect(resolveProductType('prod_personal123', {}, TARGET_PRODUCT_ID)).toBe('monthly')
     })
 
-    it('should resolve lifetime product by price ID', () => {
-      expect(resolveProductType('price_lifetime_456', {}, priceIds)).toBe('lifetime')
+    it('should resolve lifetime product by matching product ID and metadata', () => {
+      expect(resolveProductType('prod_personal123', {plan: 'lifetime'}, TARGET_PRODUCT_ID)).toBe('lifetime')
     })
 
-    it('should resolve by metadata when price ID does not match', () => {
+    it('should resolve by metadata when product ID does not match or is unavailable', () => {
       const metadata = {product: 'personal-software', plan: 'monthly'}
-      expect(resolveProductType('price_other', metadata, priceIds)).toBe('monthly')
+      expect(resolveProductType('prod_other', metadata, TARGET_PRODUCT_ID)).toBe('monthly')
     })
 
     it('should resolve lifetime by metadata', () => {
       const metadata = {product: 'personal-software', plan: 'lifetime'}
-      expect(resolveProductType('price_other', metadata, priceIds)).toBe('lifetime')
+      expect(resolveProductType('prod_other', metadata, TARGET_PRODUCT_ID)).toBe('lifetime')
     })
 
-    it('should return null for non-personal-software products', () => {
-      expect(resolveProductType('price_other', {}, priceIds)).toBeNull()
+    it('should return null for non-matching products', () => {
+      expect(resolveProductType('prod_other', {}, TARGET_PRODUCT_ID)).toBeNull()
     })
 
-    it('should return null for personal-software metadata with unknown plan', () => {
-      const metadata = {product: 'personal-software', plan: 'yearly'}
-      expect(resolveProductType('price_other', metadata, priceIds)).toBeNull()
-    })
-
-    it('should return null for completely unrelated metadata', () => {
+    it('should return null for unrelated metadata', () => {
       const metadata = {product: 'some-other-app', plan: 'monthly'}
-      expect(resolveProductType('price_other', metadata, priceIds)).toBeNull()
+      expect(resolveProductType('prod_other', metadata, TARGET_PRODUCT_ID)).toBeNull()
+    })
+
+    it('should resolve monthly if metadata has explicit days and no product id is provided', () => {
+      const metadata = {days: '90'}
+      expect(resolveProductType(null, metadata, TARGET_PRODUCT_ID)).toBe('monthly')
+    })
+
+    it('should resolve monthly if product is personal-software even if no plan is specified', () => {
+      const metadata = {product: 'personal-software', days: '180'}
+      expect(resolveProductType('prod_other', metadata, TARGET_PRODUCT_ID)).toBe('monthly')
     })
   })
 
@@ -104,6 +106,33 @@ describe('Webhook helpers', () => {
       const diff = new Date(expiry) - new Date()
       const years = diff / (1000 * 60 * 60 * 24 * 365)
       expect(years).toBeGreaterThan(99)
+    })
+
+    it('should use fixedDays instead of 30 days when provided', () => {
+      // 90 days explicitly
+      const expiry = calculateExpiry('monthly', 0, 1, 90)
+      const diff = new Date(expiry) - new Date()
+      const days = diff / (1000 * 60 * 60 * 24)
+      expect(days).toBeGreaterThan(89)
+      expect(days).toBeLessThan(91)
+    })
+
+    it('should combine fixedDays with quantity', () => {
+      // 90 days * 2 quantity = 180 days
+      const expiry = calculateExpiry('monthly', 0, 2, 90)
+      const diff = new Date(expiry) - new Date()
+      const days = diff / (1000 * 60 * 60 * 24)
+      expect(days).toBeGreaterThan(179)
+      expect(days).toBeLessThan(181)
+    })
+
+    it('should combine fixedDays, quantity, and carry-over days', () => {
+      // 90 days * 2 + 15 carry-over = 195 days
+      const expiry = calculateExpiry('monthly', 15, 2, 90)
+      const diff = new Date(expiry) - new Date()
+      const days = diff / (1000 * 60 * 60 * 24)
+      expect(days).toBeGreaterThan(194)
+      expect(days).toBeLessThan(196)
     })
   })
 })

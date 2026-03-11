@@ -1,9 +1,9 @@
-import { Router } from 'express'
+import {Router} from 'express'
 import Stripe from 'stripe'
-import { createLicense, findLicenseByPaymentId, revokeAndCarryOver, logVerification } from '../db.js'
-import { createInvoiceXpress } from '../services/invoicexpress.js'
-import { notifyNewLicensePurchased } from '../services/telegram.js'
-import { countries } from '../services/countries.js'
+import {createLicense, findLicenseByPaymentId, revokeAndCarryOver, logVerification} from '../db.js'
+import {createInvoiceXpress} from '../services/invoicexpress.js'
+import {notifyNewLicensePurchased} from '../services/telegram.js'
+import {countries} from '../services/countries.js'
 /**
  * Creates the Stripe webhook router.
  * @param {import('better-sqlite3').Database} db
@@ -18,7 +18,7 @@ export function createWebhookRouter(db) {
 
     if (!webhookSecret) {
       console.error('[webhook] STRIPE_WEBHOOK_SECRET not configured')
-      return res.status(500).json({ error: 'Webhook secret not configured' })
+      return res.status(500).json({error: 'Webhook secret not configured'})
     }
 
     let event
@@ -27,7 +27,7 @@ export function createWebhookRouter(db) {
       event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret)
     } catch (err) {
       console.error(`[webhook] Signature verification failed: ${err.message}`)
-      return res.status(400).json({ error: `Webhook signature verification failed` })
+      return res.status(400).json({error: `Webhook signature verification failed`})
     }
 
     // We handle two event types:
@@ -37,15 +37,15 @@ export function createWebhookRouter(db) {
 
     if (!handledTypes.includes(event.type)) {
       // Acknowledge but ignore other event types
-      return res.json({ received: true, handled: false })
+      return res.json({received: true, handled: false})
     }
 
     try {
       const result = await handlePaymentEvent(db, event)
-      return res.json({ received: true, handled: true, ...result })
+      return res.json({received: true, handled: true, ...result})
     } catch (err) {
       console.error(`[webhook] Error handling ${event.type}: ${err.message}`)
-      return res.status(500).json({ error: 'Internal error processing webhook' })
+      return res.status(500).json({error: 'Internal error processing webhook'})
     }
   })
 
@@ -56,13 +56,13 @@ export function createWebhookRouter(db) {
  * Process a Stripe payment event and create a license if applicable.
  */
 async function handlePaymentEvent(db, event) {
-  const MONTHLY_PRICE_ID = process.env.STRIPE_PRICE_ID_MONTHLY
-  const LIFETIME_PRICE_ID = process.env.STRIPE_PRICE_ID_LIFETIME
+  const PRODUCT_ID = process.env.STRIPE_PRODUCT_ID
 
   let email, customerId, paymentId, priceId, metadata
   let quantity = 1
   let appKey = null
   let loginUsername = null
+  let fixedDays = null
 
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object
@@ -78,7 +78,7 @@ async function handlePaymentEvent(db, event) {
         action: 'webhook_deferred',
         details: `Payment not yet confirmed (status: ${session.payment_status}). Will process on payment_intent.succeeded.`,
       })
-      return { deferred: true, reason: 'Payment not yet confirmed' }
+      return {deferred: true, reason: 'Payment not yet confirmed'}
     }
 
     // ── Extract custom fields (App Key, Login Username) ──
@@ -133,21 +133,41 @@ async function handlePaymentEvent(db, event) {
     }
   }
 
+  // Fetch price directly to extract complete metadata (including dynamic days) and product mapping
+  let priceMetadata = {}
+  let priceProductId = null
+  if (priceId) {
+    try {
+      const stripe = new Stripe(process.env.STRIPE_SECRET_KEY)
+      const priceObj = await stripe.prices.retrieve(priceId)
+      priceProductId = priceObj.product
+      priceMetadata = priceObj.metadata || {}
+      if (priceMetadata.days) {
+        fixedDays = parseInt(priceMetadata.days, 10)
+      }
+    } catch (err) {
+      console.error(`[webhook] Failed to retrieve price ${priceId}: ${err.message}`)
+    }
+  }
+
+  // Merge price metadata so resolveProductType can detect properties like `plan`
+  const combinedMetadata = { ...priceMetadata, ...metadata }
+
   // Use loginUsername + appKey as primary identity
   // Email is stored separately for consultation only
   const normalizedUsername = (loginUsername || '').toLowerCase().trim()
   const normalizedAppKey = (appKey || '').trim()
 
-  // Determine product type from price ID
-  const productType = resolveProductType(priceId, metadata, { MONTHLY_PRICE_ID, LIFETIME_PRICE_ID })
+  // Determine product type from product ID or combined metadata
+  const productType = resolveProductType(priceProductId, combinedMetadata, PRODUCT_ID)
 
   if (!productType) {
     // Not a personal-software product — ignore
     logVerification(db, {
       action: 'webhook_ignored',
-      details: `Price ID ${priceId} does not match any product (monthly: ${MONTHLY_PRICE_ID}, lifetime: ${LIFETIME_PRICE_ID})`,
+      details: `Product ID ${priceProductId} does not match allowed product (${PRODUCT_ID})`,
     })
-    return { ignored: true, reason: 'Not a matching product' }
+    return {ignored: true, reason: 'Not a matching product'}
   }
 
   if (!normalizedUsername || !normalizedAppKey) {
@@ -155,7 +175,7 @@ async function handlePaymentEvent(db, event) {
       action: 'webhook_error',
       details: `Missing required fields — loginUsername: "${loginUsername || ''}", appKey: "${appKey || ''}"`,
     })
-    return { error: true, reason: 'Login Username and App Key are both required in payment custom fields' }
+    return {error: true, reason: 'Login Username and App Key are both required in payment custom fields'}
   }
 
   // Idempotency check — don't process the same payment twice
@@ -166,11 +186,11 @@ async function handlePaymentEvent(db, event) {
       action: 'webhook_duplicate',
       details: `Payment ${paymentId} already processed`,
     })
-    return { duplicate: true }
+    return {duplicate: true}
   }
 
   // ── Carry-over logic: revoke old licenses + add remaining days ──
-  const { revokedCount, carryOverDays } = revokeAndCarryOver(db, normalizedUsername, normalizedAppKey)
+  const {revokedCount, carryOverDays} = revokeAndCarryOver(db, normalizedUsername, normalizedAppKey)
   if (revokedCount > 0) {
     logVerification(db, {
       action: 'license_carryover',
@@ -180,7 +200,7 @@ async function handlePaymentEvent(db, event) {
 
   // Calculate expiry with carry-over (lifetime doesn't carry over — already infinite)
   const baseDays = productType === 'lifetime' ? 0 : carryOverDays
-  const expiresAt = calculateExpiry(productType, baseDays, quantity)
+  const expiresAt = calculateExpiry(productType, baseDays, quantity, fixedDays)
 
   // Create license — loginUsername + appKey are the identity, email is just for consultation
   const result = createLicense(db, {
@@ -205,42 +225,42 @@ async function handlePaymentEvent(db, event) {
 
   // ── Call Invoicexpress and Telegram ──
   const amountObj = event.data.object
-  const amountPaidCents = amountObj.amount_total || amountObj.amount || 0
-  const amountPaidDec = amountPaidCents / 100
-  const currencyStr = (amountObj.currency || 'eur').toUpperCase()
-  const customerDetails = amountObj.customer_details || {}
-  const customerAddress = customerDetails.address || {}
-  const customerCountry = customerAddress.country || null
-  const countryFullName = countries.find(c => c.code2 === customerCountry)?.name
-  const customerName = customerDetails.name || normalizedUsername
+  const taxAmountCents = amountObj.total_details?.amount_tax || 0
 
-  // EU member state country codes (ISO 3166-1 alpha-2)
-  const EU_COUNTRY_CODES = new Set([
-    'AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR',
-    'DE', 'GR', 'HU', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL',
-    'PL', 'PT', 'RO', 'SK', 'SI', 'ES', 'SE',
-  ])
+  const totalAmountCents = amountObj.amount_total || amountObj.amount || 0
+  const totalAmountDec = totalAmountCents / 100
+
+  // InvoiceXpress expects the base amount before VAT
+  let baseAmountCents = amountObj.amount_subtotal
+  if (baseAmountCents === undefined) {
+    baseAmountCents = totalAmountCents - taxAmountCents
+  }
+  const baseAmountDec = baseAmountCents / 100
+
+  const currencyStr = (amountObj.currency || 'eur').toUpperCase()
+  const customerCountry = amountObj.customer_details?.address?.country || null
+  const countryFullName = countries.find(c => c.code2 === customerCountry)?.name
 
   const getTaxConfig = () => {
-    // Portugal → 23% IVA
+    // If Stripe didn't charge tax, we use the M99 exemption code
+    if (!taxAmountCents) {
+      return {taxExemptionCode: 'M99'}
+    }
+
+    // If tax was charged, we pass the correct InvoiceXpress Tax Name based on the country
     if (customerCountry === 'PT') {
-      return { taxName: 'IVA23' }
+      return {taxName: 'IVA23'}
     }
 
-    // EU countries → country-specific VAT rate
-    // Greece uses 'EL' as fiscal code instead of 'GR'
-    if (customerCountry && EU_COUNTRY_CODES.has(customerCountry)) {
-      const taxName = customerCountry === 'GR' ? 'EL' : customerCountry
-      return { taxName }
+    if (customerCountry === 'GR') {
+      return {taxName: 'EL'}
     }
 
-    // Outside EU → Tax exemption M14 (export of services)
     if (customerCountry) {
-      return { taxExemptionCode: 'M99' }
+      return {taxName: customerCountry}
     }
 
-    // Unknown country → fallback exemption
-    return { taxExemptionCode: 'M99' }
+    return {}
   }
 
   let invoice = null
@@ -251,14 +271,11 @@ async function handlePaymentEvent(db, event) {
       itemDescription: `License for user ${normalizedUsername}`,
       clientReference: customerId,
       clientEmail: email || '',
-      clientName: customerName,
-      amount: amountPaidDec,
+      clientName: normalizedUsername,
+      amount: baseAmountDec,
       sendByEmail: true,
       currencyCode: currencyStr,
       country: countryFullName,
-      address: [customerAddress.line1, customerAddress.line2].filter(Boolean).join(', ') || undefined,
-      postalCode: customerAddress.postal_code || undefined,
-      city: customerAddress.city || undefined,
       ...getTaxConfig(),
     })
   } catch (e) {
@@ -269,18 +286,18 @@ async function handlePaymentEvent(db, event) {
     const licenseEmoji = productType === 'lifetime' ? '🎰 🤑' : '🎉 💰'
     await notifyNewLicensePurchased({
       licenseName: `${licenseEmoji} Personal Software ${productType === 'lifetime' ? 'Lifetime' : 'Monthly'} ${licenseEmoji}`,
-      price: amountPaidDec.toFixed(2),
+      price: totalAmountDec.toFixed(2),
       currency: currencyStr,
       invoice: invoice,
       payment: true,
-      customer: { email: email, country: customerCountry },
+      customer: {email: email, country: customerCountry},
       endDate: productType === 'lifetime' ? undefined : expiresAt.split('T')[0],
     })
   } catch (e) {
     console.error(`[webhook] Telegram integration error:`, e)
   }
 
-  return { created: true, licenseId: result.lastInsertRowid, carryOverDays: baseDays }
+  return {created: true, licenseId: result.lastInsertRowid, carryOverDays: baseDays}
 }
 
 /**
@@ -300,21 +317,22 @@ function extractPriceIdFromSession(session) {
 }
 
 /**
- * Resolve product type from priceId or metadata.
- * Returns 'monthly' | 'lifetime' | null (if not a matching product)
+ * Resolve product type from productId or metadata.
+ * Returns 'monthly' (which stands for temporary variable duration) | 'lifetime' | null
  */
-export function resolveProductType(priceId, metadata, priceIds) {
-  // Primary: Check by price ID (most reliable — set on the Stripe price itself)
-  if (priceId) {
-    if (priceId === priceIds.MONTHLY_PRICE_ID) return 'monthly'
-    if (priceId === priceIds.LIFETIME_PRICE_ID) return 'lifetime'
+export function resolveProductType(productId, metadata, targetProductId) {
+  // Primary: Check by Product ID
+  if (productId && targetProductId && productId === targetProductId) {
+    return metadata?.plan === 'lifetime' ? 'lifetime' : 'monthly'
   }
 
-  // Fallback: Check by metadata (if manually set on the payment link)
+  // Fallback: Check by metadata (if manually set on the payment link or session)
   if (metadata?.product === 'personal-software') {
-    if (metadata?.plan === 'monthly') return 'monthly'
-    if (metadata?.plan === 'lifetime') return 'lifetime'
+    return metadata?.plan === 'lifetime' ? 'lifetime' : 'monthly'
   }
+
+  // Explicit external duration pricing as fallback
+  if (metadata?.days && !metadata?.product && !productId) return 'monthly'
 
   return null
 }
@@ -324,15 +342,17 @@ export function resolveProductType(priceId, metadata, priceIds) {
  * @param {string} productType — 'monthly' or 'lifetime'
  * @param {number} [extraDays=0] — additional days to add (carry-over from old license)
  * @param {number} [quantity=1] — number of months purchased (multiplies the 30-day base)
+ * @param {number|null} [fixedDays=null] — explicit external days for multi-duration packages
  */
-export function calculateExpiry(productType, extraDays = 0, quantity = 1) {
+export function calculateExpiry(productType, extraDays = 0, quantity = 1, fixedDays = null) {
   const now = new Date()
   if (productType === 'lifetime') {
     // 100 years — effectively permanent
     now.setFullYear(now.getFullYear() + 100)
   } else {
-    // monthly — 30 days × quantity + carry-over
-    const totalDays = 30 * quantity + extraDays
+    // temporary duration — base days × quantity + carry-over
+    const baseDays = fixedDays !== null ? fixedDays : 30
+    const totalDays = baseDays * quantity + extraDays
     now.setDate(now.getDate() + totalDays)
   }
   return now.toISOString()
