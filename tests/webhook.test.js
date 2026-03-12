@@ -3,44 +3,48 @@ import {resolveProductType, calculateExpiry} from '../src/routes/webhook.js'
 import {createDb, createLicense, revokeAndCarryOver, findActiveLicense} from '../src/db.js'
 
 describe('Webhook helpers', () => {
-  const TARGET_PRODUCT_ID = 'prod_personal123'
+  const TARGET_PRODUCT_IDS = ['prod_personal123', 'prod_secondary456']
 
   describe('resolveProductType', () => {
-    it('should resolve temporary (monthly) product by matching product ID', () => {
-      expect(resolveProductType('prod_personal123', {}, TARGET_PRODUCT_ID)).toBe('monthly')
+    it('should resolve temporary (monthly) product by matching the first product ID', () => {
+      expect(resolveProductType('prod_personal123', {}, TARGET_PRODUCT_IDS)).toBe('monthly')
+    })
+
+    it('should resolve temporary (monthly) product by matching another allowed product ID', () => {
+      expect(resolveProductType('prod_secondary456', {}, TARGET_PRODUCT_IDS)).toBe('monthly')
     })
 
     it('should resolve lifetime product by matching product ID and metadata', () => {
-      expect(resolveProductType('prod_personal123', {plan: 'lifetime'}, TARGET_PRODUCT_ID)).toBe('lifetime')
+      expect(resolveProductType('prod_personal123', {plan: 'lifetime'}, TARGET_PRODUCT_IDS)).toBe('lifetime')
     })
 
     it('should resolve by metadata when product ID does not match or is unavailable', () => {
       const metadata = {product: 'personal-software', plan: 'monthly'}
-      expect(resolveProductType('prod_other', metadata, TARGET_PRODUCT_ID)).toBe('monthly')
+      expect(resolveProductType('prod_other', metadata, TARGET_PRODUCT_IDS)).toBe('monthly')
     })
 
     it('should resolve lifetime by metadata', () => {
       const metadata = {product: 'personal-software', plan: 'lifetime'}
-      expect(resolveProductType('prod_other', metadata, TARGET_PRODUCT_ID)).toBe('lifetime')
+      expect(resolveProductType('prod_other', metadata, TARGET_PRODUCT_IDS)).toBe('lifetime')
     })
 
     it('should return null for non-matching products', () => {
-      expect(resolveProductType('prod_other', {}, TARGET_PRODUCT_ID)).toBeNull()
+      expect(resolveProductType('prod_other', {}, TARGET_PRODUCT_IDS)).toBeNull()
     })
 
     it('should return null for unrelated metadata', () => {
       const metadata = {product: 'some-other-app', plan: 'monthly'}
-      expect(resolveProductType('prod_other', metadata, TARGET_PRODUCT_ID)).toBeNull()
+      expect(resolveProductType('prod_other', metadata, TARGET_PRODUCT_IDS)).toBeNull()
     })
 
     it('should resolve monthly if metadata has explicit days and no product id is provided', () => {
       const metadata = {days: '90'}
-      expect(resolveProductType(null, metadata, TARGET_PRODUCT_ID)).toBe('monthly')
+      expect(resolveProductType(null, metadata, TARGET_PRODUCT_IDS)).toBe('monthly')
     })
 
     it('should resolve monthly if product is personal-software even if no plan is specified', () => {
       const metadata = {product: 'personal-software', days: '180'}
-      expect(resolveProductType('prod_other', metadata, TARGET_PRODUCT_ID)).toBe('monthly')
+      expect(resolveProductType('prod_other', metadata, TARGET_PRODUCT_IDS)).toBe('monthly')
     })
   })
 

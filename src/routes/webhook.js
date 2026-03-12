@@ -56,7 +56,10 @@ export function createWebhookRouter(db) {
  * Process a Stripe payment event and create a license if applicable.
  */
 async function handlePaymentEvent(db, event) {
-  const PRODUCT_ID = process.env.STRIPE_PRODUCT_ID
+  const PRODUCT_IDS = (process.env.STRIPE_PRODUCT_ID || '')
+    .split(',')
+    .map(id => id.trim())
+    .filter(Boolean)
 
   let email, customerId, paymentId, priceId, metadata
   let quantity = 1
@@ -159,13 +162,13 @@ async function handlePaymentEvent(db, event) {
   const normalizedAppKey = (appKey || '').trim()
 
   // Determine product type from product ID or combined metadata
-  const productType = resolveProductType(priceProductId, combinedMetadata, PRODUCT_ID)
+  const productType = resolveProductType(priceProductId, combinedMetadata, PRODUCT_IDS)
 
   if (!productType) {
     // Not a personal-software product — ignore
     logVerification(db, {
       action: 'webhook_ignored',
-      details: `Product ID ${priceProductId} does not match allowed product (${PRODUCT_ID})`,
+      details: `Product ID ${priceProductId} does not match allowed products (${PRODUCT_IDS.join(', ')})`,
     })
     return {ignored: true, reason: 'Not a matching product'}
   }
@@ -320,9 +323,11 @@ function extractPriceIdFromSession(session) {
  * Resolve product type from productId or metadata.
  * Returns 'monthly' (which stands for temporary variable duration) | 'lifetime' | null
  */
-export function resolveProductType(productId, metadata, targetProductId) {
-  // Primary: Check by Product ID
-  if (productId && targetProductId && productId === targetProductId) {
+export function resolveProductType(productId, metadata, targetProductIds = []) {
+  const allowedProducts = Array.isArray(targetProductIds) ? targetProductIds : [targetProductIds]
+
+  // Primary: Check if Product ID explicitly matches one of the allowed Product IDs
+  if (productId && allowedProducts.includes(productId)) {
     return metadata?.plan === 'lifetime' ? 'lifetime' : 'monthly'
   }
 
